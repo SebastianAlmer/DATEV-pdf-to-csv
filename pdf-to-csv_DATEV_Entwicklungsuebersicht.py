@@ -73,6 +73,11 @@ COST_LABELS = {
 HEADER_FILL = "D9D9D9"
 MIN_MONTH_COLUMNS = 4
 STRUCTURE_MATCH_THRESHOLD = 0.86
+DEFAULT_STRUCTURE_FILES = (
+    "DATEV_BWA_Struktur_Vorlage.csv",
+    "BWA Export Datei -leer -.csv",
+    "BWA Export Datei -leer - ohne Zeile.csv",
+)
 
 
 def normalize_month_token(token: str):
@@ -225,6 +230,14 @@ def compress_blank_rows(rows):
         cleaned.append((label, values))
         prev_blank = is_blank
     return cleaned
+
+
+def pick_default_structure_path(base_dir: Path) -> Path | None:
+    for filename in DEFAULT_STRUCTURE_FILES:
+        candidate = base_dir / "DATEV Struktur" / filename
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def build_output_table(header, final_rows, structure_template):
@@ -409,8 +422,8 @@ def convert_page_to_csv(
 
     structure_template = structure_numbers
     if structure_template is None:
-        default_structure = Path(__file__).resolve().parent / "DATEV Struktur" / "BWA Export Datei -leer -.csv"
-        if default_structure.exists():
+        default_structure = pick_default_structure_path(Path(__file__).resolve().parent)
+        if default_structure is not None:
             structure_template = load_structure_template(default_structure)
 
     if structure_template is not None:
@@ -440,14 +453,21 @@ def load_structure_template(structure_path: Path):
     with structure_path.open(encoding="utf-8-sig", newline="") as f:
         reader = csv.reader(f, delimiter=";")
         header = next(reader, None)
-        if not header or len(header) < 2:
+        if not header or not any(cell.strip() for cell in header):
             raise RuntimeError(f"Ungueltige Struktur-CSV: {structure_path}")
+        label_index = None
+        for idx, cell in enumerate(header):
+            if "bezeichnung" in cell.strip().casefold():
+                label_index = idx
+                break
+        if label_index is None:
+            label_index = 1 if len(header) > 1 else 0
         labels = []
         for row in reader:
             if not row:
                 labels.append("")
                 continue
-            label = row[1] if len(row) > 1 else ""
+            label = row[label_index] if len(row) > label_index else ""
             labels.append(label)
     return labels
 
@@ -569,8 +589,8 @@ def main():
         if not structure_path.exists():
             parser.error(f"Struktur-CSV nicht gefunden: {structure_path}")
     else:
-        default_structure = Path("DATEV Struktur") / "BWA Export Datei -leer -.csv"
-        if default_structure.exists():
+        default_structure = pick_default_structure_path(Path("."))
+        if default_structure is not None:
             structure_path = default_structure
 
     structure_template = None

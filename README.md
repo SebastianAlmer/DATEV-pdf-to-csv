@@ -27,7 +27,7 @@ python -m pip install pdfplumber pandas openpyxl
   "Entwicklungsuebersicht" enthaelt.
 - Schreibt standardmaessig CSV und XLSX (mit `--no-excel` deaktivierbar).
 - Optionale Strukturdatei zur Zeilenanzahl-Pruefung via
-  `DATEV Struktur/BWA Export Datei -leer -.csv` (oder `--structure`).
+  `DATEV Struktur/DATEV_BWA_Struktur_Vorlage.csv` (oder `--structure`).
 - Batch-Modus ueberspringt vorhandene Dateien und gibt INFO aus.
 
 Beispiele:
@@ -90,7 +90,7 @@ python -m pip install pdfplumber pandas openpyxl
   "Entwicklungsuebersicht".
 - Writes CSV and formatted XLSX by default (use `--no-excel` to disable XLSX).
 - Optional structure file for row-count validation via
-  `DATEV Struktur/BWA Export Datei -leer -.csv` (or `--structure`).
+  `DATEV Struktur/DATEV_BWA_Struktur_Vorlage.csv` (or `--structure`).
 - Batch mode skips files that already exist and prints INFO.
 
 Examples:

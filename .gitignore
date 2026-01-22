@@ -13,6 +13,7 @@ private/
 
 # Allow the published structure template
 !/DATEV Struktur/BWA Export Datei -leer -.csv
+!/DATEV Struktur/DATEV_BWA_Struktur_Vorlage.csv
 
 # Python caches/venv
 __pycache__/
