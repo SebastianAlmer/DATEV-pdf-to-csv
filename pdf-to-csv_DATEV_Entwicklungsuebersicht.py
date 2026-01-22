@@ -8,15 +8,16 @@ Usage:
 
 - Liest genau die angegebene Seite (1-basiert) aus der PDF.
 - Ohne --page wird die Seite mit "Entwicklungsuebersicht" gesucht.
-- Erwartet 13 Monats-Spalten im Kopf (z. B. "Sep/2024" oder "März 24") und haelt das DE-Zahlenformat bei.
+- Erwartet Monats-Spalten im Kopf (auch Teiljahre wie 4 Monate + Summe) und haelt das DE-Zahlenformat bei.
 - Trenner ist Semikolon; Ausgabe nutzt UTF-8 mit BOM, damit Excel Umlaute korrekt oeffnet.
 - Mit --batch werden alle PDFs im Input-Ordner verarbeitet.
-- Optional: Struktur-CSV kann zur Pruefung der Zeilenanzahl genutzt werden.
+- Optional: Struktur-CSV kann zur Vorgabe der Zeilenstruktur genutzt werden.
 - Standardmaessig wird zusaetzlich eine .xlsx geschrieben (mit --no-excel deaktivierbar).
 - Ohne Parameter laeuft ein Batch von input nach output.
 """
 import argparse
 import csv
+import difflib
 import re
 import sys
 from pathlib import Path
@@ -29,7 +30,12 @@ MONTHS_RE = re.compile(
     r"\s*(?:[/\.\-]\s*|\s+)\d{2,4}\b"
 )
 DE_NUMBER_RE = re.compile(r"-?\d{1,3}(?:\.\d{3})*,\d{2}|-?0,00")
-ENTWICKLUNGSUEBERSICHT_TERMS = ("entwicklungsübersicht", "entwicklungsuebersicht")
+ENTWICKLUNGSUEBERSICHT_TERMS = (
+    "entwicklungsübersicht",
+    "entwicklungsuebersicht",
+    "jahresübersicht",
+    "jahresuebersicht",
+)
 SEPARATOR_CLEAN_RE = re.compile(r"\s*([/.\-])\s*")
 
 SECTION_BREAK_AFTER = {
@@ -65,6 +71,8 @@ COST_LABELS = {
 
 
 HEADER_FILL = "D9D9D9"
+MIN_MONTH_COLUMNS = 4
+STRUCTURE_MATCH_THRESHOLD = 0.86
 
 
 def normalize_month_token(token: str):
@@ -96,17 +104,45 @@ def extract_month_tokens(text: str):
     return ordered
 
 
+def find_month_range(text: str):
+    compact = " ".join(text.splitlines())
+    matches = list(MONTHS_RE.finditer(compact))
+    for idx in range(len(matches) - 1):
+        between = compact[matches[idx].end() : matches[idx + 1].start()]
+        if "-" in between:
+            start = normalize_month_token(matches[idx].group(0))
+            end = normalize_month_token(matches[idx + 1].group(0))
+            return start, end
+    return None
+
+
+def build_header_columns(text: str):
+    ordered = extract_month_tokens(text)
+    if not ordered:
+        return None
+    range_tokens = find_month_range(text)
+    if range_tokens:
+        range_label = f"{range_tokens[0]} - {range_tokens[1]}"
+        if range_label not in ordered:
+            ordered.append(range_label)
+    return ordered
+
+
 def detect_month_header(text: str):
-    for raw_line in text.splitlines():
+    lines = text.splitlines()
+    for idx, raw_line in enumerate(lines):
         if "Bezeichnung" not in raw_line:
             continue
-        ordered = extract_month_tokens(raw_line)
-        if len(ordered) >= 13:
-            return ordered[-13:]
+        header_text = raw_line
+        if raw_line.rstrip().endswith("-") and idx + 1 < len(lines):
+            header_text = f"{raw_line} {lines[idx + 1].strip()}"
+        ordered = build_header_columns(header_text)
+        if ordered and len(ordered) >= MIN_MONTH_COLUMNS:
+            return ordered
 
-    ordered = extract_month_tokens(text)
-    if len(ordered) >= 13:
-        return ordered[-13:]
+    ordered = build_header_columns(text)
+    if ordered and len(ordered) >= MIN_MONTH_COLUMNS:
+        return ordered
     return None
 
 
@@ -119,6 +155,25 @@ def parse_de_amount(value):
     if DE_NUMBER_RE.fullmatch(text) is None:
         return value
     return float(text.replace(".", "").replace(",", "."))
+
+
+def normalize_label(text: str) -> str:
+    if not text:
+        return ""
+    normalized = text.strip().casefold()
+    normalized = (
+        normalized.replace("ä", "ae")
+        .replace("ö", "oe")
+        .replace("ü", "ue")
+        .replace("ß", "ss")
+        .replace("Ã¤", "ae")
+        .replace("Ã¶", "oe")
+        .replace("Ã¼", "ue")
+        .replace("ÃŸ", "ss")
+    )
+    normalized = normalized.replace("\ufffd", "")
+    normalized = re.sub(r"[^a-z0-9]+", "", normalized)
+    return normalized
 
 
 def parse_rows_from_text(text: str, months):
@@ -172,11 +227,11 @@ def compress_blank_rows(rows):
     return cleaned
 
 
-def build_output_table(header, final_rows, structure_numbers):
-    if structure_numbers is not None and len(structure_numbers) != len(final_rows):
+def build_output_table(header, final_rows, structure_template):
+    if structure_template is not None and len(structure_template) != len(final_rows):
         raise RuntimeError(
             "Struktur hat "
-            f"{len(structure_numbers)} Zeilen, Ergebnis hat {len(final_rows)} Zeilen."
+            f"{len(structure_template)} Zeilen, Ergebnis hat {len(final_rows)} Zeilen."
         )
 
     columns = ["Bezeichnung"] + header
@@ -187,6 +242,55 @@ def build_output_table(header, final_rows, structure_numbers):
         else:
             rows.append([label] + values)
     return columns, rows
+
+
+def align_rows_to_structure(structure_template, extracted_rows, months_count):
+    extracted_map = {}
+    for label, values in extracted_rows:
+        key = normalize_label(label)
+        if not key:
+            continue
+        if key not in extracted_map:
+            extracted_map[key] = (label, values)
+
+    used_keys = set()
+    aligned = []
+    for template_label in structure_template:
+        label_text = template_label or ""
+        if not label_text.strip():
+            aligned.append(("", [""] * months_count))
+            continue
+        template_key = normalize_label(label_text)
+        values = None
+        matched_label = None
+        if template_key in extracted_map and template_key not in used_keys:
+            matched_label, values = extracted_map[template_key]
+            used_keys.add(template_key)
+        else:
+            best_key = None
+            best_ratio = 0.0
+            for key in extracted_map:
+                if key in used_keys:
+                    continue
+                ratio = difflib.SequenceMatcher(None, template_key, key).ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_key = key
+            if best_key is not None and best_ratio >= STRUCTURE_MATCH_THRESHOLD:
+                matched_label, values = extracted_map[best_key]
+                used_keys.add(best_key)
+
+        if values is None:
+            values = [""] * months_count
+        elif len(values) != months_count:
+            values = (values + [""] * months_count)[:months_count]
+
+        leading_ws = label_text[: len(label_text) - len(label_text.lstrip())]
+        trailing_ws = label_text[len(label_text.rstrip()) :]
+        core = matched_label.strip() if matched_label else label_text.strip()
+        display_label = f"{leading_ws}{core}{trailing_ws}"
+        aligned.append((display_label, values))
+    return aligned
 
 
 def write_csv_table(columns, rows, out_path: Path):
@@ -290,7 +394,7 @@ def convert_page_to_csv(
 
     header = detect_month_header(page_text)
     if not header:
-        raise RuntimeError("Konnte keine 13 Monats-Spalten auf der Seite erkennen.")
+        raise RuntimeError("Konnte keine Monats-Spalten auf der Seite erkennen.")
 
     rows = parse_rows_from_text(page_text, header)
     rows = ensure_kostenarten(rows, header)
@@ -303,8 +407,18 @@ def convert_page_to_csv(
             seen.add(key)
             uniq_rows.append((label, values))
 
-    final_rows = compress_blank_rows(insert_section_breaks(uniq_rows, len(header)))
-    columns, rows = build_output_table(header, final_rows, structure_numbers)
+    structure_template = structure_numbers
+    if structure_template is None:
+        default_structure = Path(__file__).resolve().parent / "DATEV Struktur" / "BWA Export Datei -leer -.csv"
+        if default_structure.exists():
+            structure_template = load_structure_template(default_structure)
+
+    if structure_template is not None:
+        final_rows = align_rows_to_structure(structure_template, uniq_rows, len(header))
+    else:
+        final_rows = compress_blank_rows(insert_section_breaks(uniq_rows, len(header)))
+
+    columns, rows = build_output_table(header, final_rows, structure_template)
     write_csv_table(columns, rows, out_path)
     if write_excel_file:
         excel_target = excel_path or out_path.with_suffix(".xlsx")
@@ -322,18 +436,20 @@ def build_output_paths(out_dir: Path, pdf_path: Path, excel_dir: Path | None, wr
     return csv_path, excel_path
 
 
-def load_structure_numbers(structure_path: Path):
+def load_structure_template(structure_path: Path):
     with structure_path.open(encoding="utf-8-sig", newline="") as f:
         reader = csv.reader(f, delimiter=";")
         header = next(reader, None)
         if not header or len(header) < 2:
             raise RuntimeError(f"Ungueltige Struktur-CSV: {structure_path}")
-        numbers = []
+        labels = []
         for row in reader:
             if not row:
+                labels.append("")
                 continue
-            numbers.append(row[0].strip())
-    return numbers
+            label = row[1] if len(row) > 1 else ""
+            labels.append(label)
+    return labels
 
 
 def convert_batch(
@@ -457,9 +573,9 @@ def main():
         if default_structure.exists():
             structure_path = default_structure
 
-    structure_numbers = None
+    structure_template = None
     if structure_path is not None:
-        structure_numbers = load_structure_numbers(structure_path)
+        structure_template = load_structure_template(structure_path)
 
     write_excel_file = not args.no_excel
 
@@ -478,7 +594,7 @@ def main():
             args.page,
             write_excel_file,
             args.excel_dir,
-            structure_numbers,
+            structure_template,
         )
         if skipped:
             safe_print(f"{len(skipped)} PDFs uebersprungen.")
@@ -494,7 +610,7 @@ def main():
         pdf_path,
         args.page,
         args.out,
-        structure_numbers,
+        structure_template,
         write_excel_file,
         args.excel,
     )
